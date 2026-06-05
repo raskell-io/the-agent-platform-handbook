@@ -1,4 +1,4 @@
-import type { Tool } from "./types";
+import type { Tool } from "../types";
 
 const SANDBOX_IMAGE = "alpine:3.20";
 const SANDBOX_WORKDIR = "/work";
@@ -35,14 +35,19 @@ export const shell: Tool = {
     },
     required: ["command"],
   },
+  max_output_bytes: 64 * 1024,
   run: async ({ command }) => {
-    const args = dockerArgs(SANDBOX_IMAGE, String(command));
-    const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const code = await proc.exited;
-    return JSON.stringify({ code, stdout, stderr });
+    try {
+      const args = dockerArgs(SANDBOX_IMAGE, String(command));
+      const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      const code = await proc.exited;
+      return { ok: true, value: JSON.stringify({ code, stdout, stderr }) };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
   },
 };

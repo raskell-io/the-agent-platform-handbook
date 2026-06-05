@@ -13,10 +13,12 @@ post discusses.
 |-----------|-------------------------------------------------------------------------------------------------|
 | `post-01` | [What an Agent Actually Is](https://raskell.io/articles/what-an-agent-actually-is/)             |
 | `post-02` | [Your Agent Wants Root](https://raskell.io/articles/your-agent-wants-root/)                     |
+| `post-03` | [Tools: How Agents Actually Do Things](https://raskell.io/articles/tools-how-agents-actually-do-things/) |
 
 ```
 git checkout post-01   # the ~150-line single-tool agent
 git checkout post-02   # adds a hardened, sandboxed shell tool
+git checkout post-03   # adds a real registry, three more tools, parallel dispatch
 ```
 
 `main` always tracks the latest post.
@@ -45,3 +47,18 @@ flag (or run the agent inside a Linux VM) and the hardened Docker flags
 still apply.
 
 Requires `docker` on the host.
+
+## Post-03 notes
+
+`post-03` promotes the one-tool agent into a real toolbox. The tools move
+into a `tools/` subdirectory, `types.ts` gains a tagged-union `ToolResult`
+and a `max_output_bytes` field, a new `registry.ts` owns lookup, dispatch,
+exception wrapping, and per-tool output capping, and `agent.ts` runs all
+tool calls from a single turn in parallel via `Promise.all`. Three new
+tools land: `fs_read`, `http_get`, and `git` (read-only allow-list).
+
+The diff against `post-02`:
+
+```
+git diff post-02 post-03
+```

@@ -1,22 +1,32 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { MessageParam, ToolResultBlockParam } from "@anthropic-ai/sdk/resources/messages";
-import { shell } from "./tools";
-import type { Tool } from "./types";
+import type { MessageParam, ToolUseBlock } from "@anthropic-ai/sdk/resources/messages";
+import { Registry } from "./registry";
+import { shell } from "./tools/shell";
+import { fs_read } from "./tools/fs";
+import { http_get } from "./tools/http";
+import { git } from "./tools/git";
 
 const client = new Anthropic();
-const tools: Tool[] = [shell];
+
+const tools = new Registry()
+  .register(shell)
+  .register(fs_read)
+  .register(http_get)
+  .register(git);
 
 const SYSTEM_PROMPT = `You are a careful command-line assistant.
-You have access to a shell tool. Use it to investigate the user's
-request and answer concretely. When you have the answer, stop calling
-tools and reply in plain text.`;
+You have access to a small toolbox: a sandboxed shell, a file reader,
+an HTTP GET, and a read-only git wrapper. Use them to investigate the
+user's request and answer concretely. Multiple tools may run in one
+turn. When you have the answer, stop calling tools and reply in plain
+text.`;
 
 async function step(messages: MessageParam[]) {
   return client.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 4096,
     system: SYSTEM_PROMPT,
-    tools: tools.map(({ run, ...t }) => t),
+    tools: tools.schemas(),
     messages,
   });
 }
@@ -41,34 +51,23 @@ export async function run(goal: string, maxIterations = 10) {
       throw new Error(`unexpected stop reason: ${response.stop_reason}`);
     }
 
-    const toolResults: ToolResultBlockParam[] = [];
-    for (const block of response.content) {
-      if (block.type !== "tool_use") continue;
-      const tool = tools.find((t) => t.name === block.name);
-      if (!tool) {
-        toolResults.push({
-          type: "tool_result",
+    const calls = response.content.filter(
+      (b): b is ToolUseBlock => b.type === "tool_use",
+    );
+    const results = await Promise.all(
+      calls.map(async (block) => {
+        const result = await tools.dispatch(block.name, block.input as Record<string, unknown>);
+        console.error(`> ${block.name} ${JSON.stringify(block.input)} -> ${result.ok ? "ok" : "err"}`);
+        return {
+          type: "tool_result" as const,
           tool_use_id: block.id,
-          content: `unknown tool: ${block.name}`,
-          is_error: true,
-        });
-        continue;
-      }
-      console.error(`> ${block.name} ${JSON.stringify(block.input)}`);
-      try {
-        const result = await tool.run(block.input as Record<string, unknown>);
-        toolResults.push({ type: "tool_result", tool_use_id: block.id, content: result });
-      } catch (err) {
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: block.id,
-          content: String(err),
-          is_error: true,
-        });
-      }
-    }
+          content: result.ok ? result.value : result.error,
+          is_error: !result.ok,
+        };
+      }),
+    );
 
-    messages.push({ role: "user", content: toolResults });
+    messages.push({ role: "user", content: results });
   }
 
   console.error(`iteration limit (${maxIterations}) reached`);

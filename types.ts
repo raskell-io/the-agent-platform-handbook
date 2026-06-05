@@ -1,3 +1,7 @@
+export type ToolResult =
+  | { ok: true; value: string }
+  | { ok: false; error: string };
+
 export type Tool = {
   name: string;
   description: string;
@@ -6,5 +10,6 @@ export type Tool = {
     properties: Record<string, unknown>;
     required?: string[];
   };
-  run: (input: Record<string, unknown>) => Promise<string>;
+  max_output_bytes?: number;
+  run: (input: Record<string, unknown>) => Promise<ToolResult>;
 };
