@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { MessageParam, ToolResultBlockParam } from "@anthropic-ai/sdk/resources/messages";
-import { shell, type Tool } from "./tools";
+import { shell } from "./tools";
+import type { Tool } from "./types";
 
 const client = new Anthropic();
 const tools: Tool[] = [shell];

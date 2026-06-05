@@ -32,3 +32,16 @@ git checkout post-02   # adds a hardened, sandboxed shell tool
 bun install
 bun agent.ts "list the three largest files under /etc"
 ```
+
+## Post-02 notes
+
+`post-02` adds a hardened, sandboxed shell tool. Tool calls now run inside
+a one-shot `alpine:3.20` container with no network, a read-only rootfs,
+all Linux capabilities dropped, an unprivileged uid, `no-new-privileges`,
+and CPU/memory/pid caps. On Linux, install
+[gVisor](https://gvisor.dev/docs/user_guide/install/) and the args use
+`--runtime=runsc` automatically. On macOS, drop the `--runtime=runsc`
+flag (or run the agent inside a Linux VM) and the hardened Docker flags
+still apply.
+
+Requires `docker` on the host.
