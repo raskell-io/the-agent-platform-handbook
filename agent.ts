@@ -5,6 +5,7 @@ import { shell } from "./tools/shell";
 import { fs_read } from "./tools/fs";
 import { http_get } from "./tools/http";
 import { git } from "./tools/git";
+import { loadContext, type LoadedContext } from "./context";
 
 const client = new Anthropic();
 
@@ -14,28 +15,45 @@ const tools = new Registry()
   .register(http_get)
   .register(git);
 
-const SYSTEM_PROMPT = `You are a careful command-line assistant.
+const CORE_PROMPT = `You are a careful command-line assistant.
 You have access to a small toolbox: a sandboxed shell, a file reader,
 an HTTP GET, and a read-only git wrapper. Use them to investigate the
 user's request and answer concretely. Multiple tools may run in one
 turn. When you have the answer, stop calling tools and reply in plain
 text.`;
 
-async function step(messages: MessageParam[]) {
+function systemPrompt(ctx: LoadedContext): string {
+  if (ctx.sources.length === 0) return CORE_PROMPT;
+  return (
+    CORE_PROMPT +
+    "\n\nProject context loaded from .AGENTS/. Treat the contents below " +
+    "as authoritative for this project's conventions and terminology. " +
+    "Each block is wrapped in <context path=\"...\"> tags so you can cite " +
+    "it back to the user.\n\n" +
+    ctx.rendered
+  );
+}
+
+async function step(messages: MessageParam[], system: string) {
   return client.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 4096,
-    system: SYSTEM_PROMPT,
+    system,
     tools: tools.schemas(),
     messages,
   });
 }
 
 export async function run(goal: string, maxIterations = 10) {
+  const ctx = await loadContext();
+  const system = systemPrompt(ctx);
+  for (const s of ctx.sources) {
+    console.error(`# context ${s.path} (${s.bytes}B${s.truncated ? ", truncated" : ""})`);
+  }
   const messages: MessageParam[] = [{ role: "user", content: goal }];
 
   for (let i = 0; i < maxIterations; i++) {
-    const response = await step(messages);
+    const response = await step(messages, system);
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason === "end_turn") {

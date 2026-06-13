@@ -14,11 +14,13 @@ post discusses.
 | `post-01` | [What an Agent Actually Is](https://raskell.io/articles/what-an-agent-actually-is/)             |
 | `post-02` | [Your Agent Wants Root](https://raskell.io/articles/your-agent-wants-root/)                     |
 | `post-03` | [Tools: How Agents Actually Do Things](https://raskell.io/articles/tools-how-agents-actually-do-things/) |
+| `post-04` | [Context Is the Product](https://raskell.io/articles/context-is-the-product/)                    |
 
 ```
 git checkout post-01   # the ~150-line single-tool agent
 git checkout post-02   # adds a hardened, sandboxed shell tool
 git checkout post-03   # adds a real registry, three more tools, parallel dispatch
+git checkout post-04   # adds a .AGENTS/ context loader
 ```
 
 `main` always tracks the latest post.
@@ -61,4 +63,25 @@ The diff against `post-02`:
 
 ```
 git diff post-02 post-03
+```
+
+## Post-04 notes
+
+`post-04` adds the context layer. A new `context.ts` loads markdown
+files from a `.AGENTS/` directory at startup, applies a 32 KB byte
+budget across all sources, and wraps each one in a `<context path="...">`
+block. `agent.ts` weaves the rendered context into the system prompt
+underneath a small `CORE_PROMPT` describing the agent's role and tools.
+
+The repo ships with three example sources: `overview.md`,
+`conventions.md`, and `glossary.md`. Drop more `.md` files in
+`.AGENTS/` and they get loaded alphabetically after the three known
+names. Override the directory with the `AGENTS_DIR` environment
+variable. Override the byte budget by passing `maxBytes` to
+`loadContext()`.
+
+The diff against `post-03`:
+
+```
+git diff post-03 post-04
 ```
