@@ -5,55 +5,79 @@ import { shell } from "./tools/shell";
 import { fs_read } from "./tools/fs";
 import { http_get } from "./tools/http";
 import { git } from "./tools/git";
+import { makeContextSearch } from "./tools/context_search";
 import { loadContext, type LoadedContext } from "./context";
+import { buildIndex, manifest, type Index } from "./retriever";
 
 const client = new Anthropic();
 
-const tools = new Registry()
-  .register(shell)
-  .register(fs_read)
-  .register(http_get)
-  .register(git);
+function buildRegistry(index: Index): Registry {
+  return new Registry()
+    .register(shell)
+    .register(fs_read)
+    .register(http_get)
+    .register(git)
+    .register(makeContextSearch(index));
+}
 
 const CORE_PROMPT = `You are a careful command-line assistant.
 You have access to a small toolbox: a sandboxed shell, a file reader,
-an HTTP GET, and a read-only git wrapper. Use them to investigate the
-user's request and answer concretely. Multiple tools may run in one
-turn. When you have the answer, stop calling tools and reply in plain
-text.`;
+an HTTP GET, a read-only git wrapper, and a project context search. Use
+them to investigate the user's request and answer concretely. Multiple
+tools may run in one turn. When you have the answer, stop calling tools
+and reply in plain text.`;
 
-function systemPrompt(ctx: LoadedContext): string {
-  if (ctx.sources.length === 0) return CORE_PROMPT;
-  return (
-    CORE_PROMPT +
-    "\n\nProject context loaded from .AGENTS/. Treat the contents below " +
-    "as authoritative for this project's conventions and terminology. " +
-    "Each block is wrapped in <context path=\"...\"> tags so you can cite " +
-    "it back to the user.\n\n" +
-    ctx.rendered
-  );
+function systemPrompt(ctx: LoadedContext, index: Index): string {
+  const parts = [CORE_PROMPT];
+
+  if (ctx.sources.length > 0) {
+    parts.push(
+      "Project context pinned from .AGENTS/. Treat the contents below as " +
+      "authoritative for this project's conventions and terminology. Each " +
+      "block is wrapped in <context path=\"...\"> tags so you can cite it " +
+      "back to the user.\n\n" +
+      ctx.rendered,
+    );
+  }
+
+  const m = manifest(index);
+  if (m) {
+    parts.push(
+      "More project context is available on demand. Call context_search " +
+      "with a natural-language query to pull the relevant sections instead " +
+      "of guessing. Searchable sources and their sections:\n\n" + m,
+    );
+  }
+
+  return parts.join("\n\n");
 }
 
-async function step(messages: MessageParam[], system: string) {
+async function step(registry: Registry, messages: MessageParam[], system: string) {
   return client.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 4096,
     system,
-    tools: tools.schemas(),
+    tools: registry.schemas(),
     messages,
   });
 }
 
 export async function run(goal: string, maxIterations = 10) {
   const ctx = await loadContext();
-  const system = systemPrompt(ctx);
+  const index = await buildIndex();
+  const registry = buildRegistry(index);
+  const system = systemPrompt(ctx, index);
   for (const s of ctx.sources) {
-    console.error(`# context ${s.path} (${s.bytes}B${s.truncated ? ", truncated" : ""})`);
+    console.error(`# pinned ${s.path} (${s.bytes}B${s.truncated ? ", truncated" : ""})`);
+  }
+  if (index.chunks.length > 0) {
+    const paths = new Set(index.chunks.map((c) => c.path));
+    console.error(`# searchable ${index.chunks.length} sections across ${paths.size} files`);
   }
   const messages: MessageParam[] = [{ role: "user", content: goal }];
 
   for (let i = 0; i < maxIterations; i++) {
-    const response = await step(messages, system);
+    const response = await step(registry, messages, system);
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason === "end_turn") {
@@ -74,7 +98,7 @@ export async function run(goal: string, maxIterations = 10) {
     );
     const results = await Promise.all(
       calls.map(async (block) => {
-        const result = await tools.dispatch(block.name, block.input as Record<string, unknown>);
+        const result = await registry.dispatch(block.name, block.input as Record<string, unknown>);
         console.error(`> ${block.name} ${JSON.stringify(block.input)} -> ${result.ok ? "ok" : "err"}`);
         return {
           type: "tool_result" as const,

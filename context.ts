@@ -22,37 +22,38 @@ export type ContextOptions = {
 
 const DEFAULT_DIR = ".AGENTS";
 const DEFAULT_MAX_BYTES = 32 * 1024;
-const PRIORITY = ["overview.md", "conventions.md", "glossary.md"];
 
-async function isDir(path: string): Promise<boolean> {
+// Pinned files load into every turn. They carry cross-cutting rules that
+// have to be true regardless of the task. Everything else in .AGENTS/ is
+// searchable on demand through the context_search tool (see retriever.ts).
+export const PINNED = ["overview.md", "conventions.md"];
+
+export function resolveDir(dir?: string): string {
+  return dir ?? process.env.AGENTS_DIR ?? DEFAULT_DIR;
+}
+
+export function isPinned(name: string): boolean {
+  return PINNED.includes(name);
+}
+
+export async function isContextDir(path: string): Promise<boolean> {
   try {
-    const s = await stat(path);
-    return s.isDirectory();
+    return (await stat(path)).isDirectory();
   } catch {
     return false;
   }
 }
 
-function orderEntries(entries: string[]): string[] {
-  const present = new Set(entries);
-  const head = PRIORITY.filter((n) => present.has(n));
-  const tail = entries
-    .filter((n) => !PRIORITY.includes(n))
-    .filter((n) => n.endsWith(".md"))
-    .sort();
-  return [...head, ...tail];
-}
-
 export async function loadContext(opts: ContextOptions = {}): Promise<LoadedContext> {
-  const dir = opts.dir ?? process.env.AGENTS_DIR ?? DEFAULT_DIR;
+  const dir = resolveDir(opts.dir);
   const budget = opts.maxBytes ?? DEFAULT_MAX_BYTES;
 
-  if (!(await isDir(dir))) {
+  if (!(await isContextDir(dir))) {
     return { sources: [], rendered: "", totalBytes: 0, budgetBytes: budget };
   }
 
-  const entries = await readdir(dir);
-  const ordered = orderEntries(entries);
+  const present = new Set(await readdir(dir));
+  const ordered = PINNED.filter((n) => present.has(n));
 
   const sources: ContextSource[] = [];
   let used = 0;

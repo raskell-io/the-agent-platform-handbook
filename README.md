@@ -15,12 +15,14 @@ post discusses.
 | `post-02` | [Your Agent Wants Root](https://raskell.io/articles/your-agent-wants-root/)                     |
 | `post-03` | [Tools: How Agents Actually Do Things](https://raskell.io/articles/tools-how-agents-actually-do-things/) |
 | `post-04` | [Context Is the Product](https://raskell.io/articles/context-is-the-product/)                    |
+| `post-05` | [Retrieval Is a Tool, Not a Layer](https://raskell.io/articles/retrieval-is-a-tool-not-a-layer/) |
 
 ```
 git checkout post-01   # the ~150-line single-tool agent
 git checkout post-02   # adds a hardened, sandboxed shell tool
 git checkout post-03   # adds a real registry, three more tools, parallel dispatch
 git checkout post-04   # adds a .AGENTS/ context loader
+git checkout post-05   # turns the loader into a lexical retriever behind a tool
 ```
 
 `main` always tracks the latest post.
@@ -84,4 +86,30 @@ The diff against `post-03`:
 
 ```
 git diff post-03 post-04
+```
+
+## Post-05 notes
+
+`post-05` splits the context layer in two. `context.ts` now only pins the
+always-on files, `overview.md` and `conventions.md`, into the system
+prompt. The rest of `.AGENTS/` becomes searchable on demand. A new
+`retriever.ts` chunks the non-pinned markdown by heading, ranks sections
+with BM25, and renders a manifest of what is available. A new
+`tools/context_search.ts` exposes that retriever as a registry tool, so
+the model pulls the slice it needs per task instead of paying for the
+whole directory every turn.
+
+No embeddings and no vector store: at `.AGENTS/` scale the corpus is a
+handful of markdown files, and a lexical ranker beats a database you have
+to host and keep in sync. The article explains when embeddings start to
+earn their keep.
+
+The repo adds two more searchable sources, `security.md` and
+`architecture.md`, alongside the now-searchable `glossary.md`. The
+`context_search` tool takes a `query` and an optional `k` (default 3).
+
+The diff against `post-04`:
+
+```
+git diff post-04 post-05
 ```
