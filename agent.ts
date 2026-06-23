@@ -6,28 +6,34 @@ import { fs_read } from "./tools/fs";
 import { http_get } from "./tools/http";
 import { git } from "./tools/git";
 import { makeContextSearch } from "./tools/context_search";
+import { makeMemorySearch } from "./tools/memory_search";
+import { memory_write } from "./tools/memory_write";
 import { loadContext, type LoadedContext } from "./context";
 import { buildIndex, manifest, type Index } from "./retriever";
+import { loadMemory, buildMemoryIndex, type LoadedMemory } from "./memory";
 
 const client = new Anthropic();
 
-function buildRegistry(index: Index): Registry {
+function buildRegistry(contextIndex: Index, memoryIndex: Index): Registry {
   return new Registry()
     .register(shell)
     .register(fs_read)
     .register(http_get)
     .register(git)
-    .register(makeContextSearch(index));
+    .register(makeContextSearch(contextIndex))
+    .register(makeMemorySearch(memoryIndex))
+    .register(memory_write);
 }
 
 const CORE_PROMPT = `You are a careful command-line assistant.
 You have access to a small toolbox: a sandboxed shell, a file reader,
-an HTTP GET, a read-only git wrapper, and a project context search. Use
-them to investigate the user's request and answer concretely. Multiple
-tools may run in one turn. When you have the answer, stop calling tools
-and reply in plain text.`;
+an HTTP GET, a read-only git wrapper, a project context search, and a
+durable memory you can search and write to. Use them to investigate the
+user's request and answer concretely. Multiple tools may run in one
+turn. When you have the answer, stop calling tools and reply in plain
+text.`;
 
-function systemPrompt(ctx: LoadedContext, index: Index): string {
+function systemPrompt(ctx: LoadedContext, contextIndex: Index, mem: LoadedMemory): string {
   const parts = [CORE_PROMPT];
 
   if (ctx.sources.length > 0) {
@@ -40,12 +46,31 @@ function systemPrompt(ctx: LoadedContext, index: Index): string {
     );
   }
 
-  const m = manifest(index);
+  const m = manifest(contextIndex);
   if (m) {
     parts.push(
       "More project context is available on demand. Call context_search " +
       "with a natural-language query to pull the relevant sections instead " +
       "of guessing. Searchable sources and their sections:\n\n" + m,
+    );
+  }
+
+  if (mem.rendered) {
+    parts.push(
+      "You keep a durable memory across sessions. The entries below are " +
+      "notes you saved on earlier runs, one line each. They are your own " +
+      "past observations, not project ground truth: treat them as fallible, " +
+      "prefer the pinned .AGENTS/ context when they conflict, and verify " +
+      "against the live system before acting. Call memory_search to pull the " +
+      "full text of a relevant entry. Call memory_write to save a new durable " +
+      "fact when you learn one that is stable and reusable.\n\n" +
+      mem.rendered,
+    );
+  } else {
+    parts.push(
+      "You keep a durable memory across sessions. It is currently empty. " +
+      "Call memory_write to save a stable, reusable fact when you learn one. " +
+      "Do not save things that only matter for the current task.",
     );
   }
 
@@ -64,15 +89,20 @@ async function step(registry: Registry, messages: MessageParam[], system: string
 
 export async function run(goal: string, maxIterations = 10) {
   const ctx = await loadContext();
-  const index = await buildIndex();
-  const registry = buildRegistry(index);
-  const system = systemPrompt(ctx, index);
+  const contextIndex = await buildIndex();
+  const mem = await loadMemory();
+  const memoryIndex = await buildMemoryIndex();
+  const registry = buildRegistry(contextIndex, memoryIndex);
+  const system = systemPrompt(ctx, contextIndex, mem);
   for (const s of ctx.sources) {
     console.error(`# pinned ${s.path} (${s.bytes}B${s.truncated ? ", truncated" : ""})`);
   }
-  if (index.chunks.length > 0) {
-    const paths = new Set(index.chunks.map((c) => c.path));
-    console.error(`# searchable ${index.chunks.length} sections across ${paths.size} files`);
+  if (contextIndex.chunks.length > 0) {
+    const paths = new Set(contextIndex.chunks.map((c) => c.path));
+    console.error(`# searchable ${contextIndex.chunks.length} sections across ${paths.size} files`);
+  }
+  if (mem.memories.length > 0) {
+    console.error(`# memory ${mem.memories.length} entries`);
   }
   const messages: MessageParam[] = [{ role: "user", content: goal }];
 

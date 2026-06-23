@@ -24,11 +24,38 @@ const STOP = new Set([
   "your", "if", "use", "when", "from", "into", "than",
 ]);
 
-function tokenize(text: string): string[] {
+export function tokenize(text: string): string[] {
   return text
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter((t) => t.length > 1 && !STOP.has(t));
+}
+
+// Build one chunk: count term frequencies and record length for BM25 length
+// normalization. Exported so a second corpus (memory) can assemble its own
+// chunks and rank them with the same search() below.
+export function makeChunk(path: string, heading: string, text: string): Chunk {
+  const tf = new Map<string, number>();
+  let length = 0;
+  for (const tok of tokenize(text)) {
+    tf.set(tok, (tf.get(tok) ?? 0) + 1);
+    length++;
+  }
+  return { path, heading, text, length, tf };
+}
+
+// Turn a set of chunks into a searchable index: document frequencies and the
+// average chunk length, computed once. Both buildIndex and the memory layer
+// finish here.
+export function indexChunks(chunks: Chunk[]): Index {
+  const df = new Map<string, number>();
+  for (const c of chunks) {
+    for (const term of c.tf.keys()) df.set(term, (df.get(term) ?? 0) + 1);
+  }
+  const avgLength = chunks.length === 0
+    ? 0
+    : chunks.reduce((sum, c) => sum + c.length, 0) / chunks.length;
+  return { chunks, df, avgLength };
 }
 
 function chunkMarkdown(path: string, raw: string): Chunk[] {
@@ -39,13 +66,7 @@ function chunkMarkdown(path: string, raw: string): Chunk[] {
   const flush = () => {
     const body = buf.join("\n").trim();
     if (body.length === 0) return;
-    const tf = new Map<string, number>();
-    let length = 0;
-    for (const tok of tokenize(body)) {
-      tf.set(tok, (tf.get(tok) ?? 0) + 1);
-      length++;
-    }
-    chunks.push({ path, heading, text: body, length, tf });
+    chunks.push(makeChunk(path, heading, body));
   };
 
   for (const line of raw.split("\n")) {
@@ -79,16 +100,7 @@ export async function buildIndex(opts: { dir?: string } = {}): Promise<Index> {
     chunks.push(...chunkMarkdown(join(dir, name), raw));
   }
 
-  const df = new Map<string, number>();
-  for (const c of chunks) {
-    for (const term of c.tf.keys()) df.set(term, (df.get(term) ?? 0) + 1);
-  }
-
-  const avgLength = chunks.length === 0
-    ? 0
-    : chunks.reduce((sum, c) => sum + c.length, 0) / chunks.length;
-
-  return { chunks, df, avgLength };
+  return indexChunks(chunks);
 }
 
 const K1 = 1.5;

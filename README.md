@@ -16,6 +16,7 @@ post discusses.
 | `post-03` | [Tools: How Agents Actually Do Things](https://raskell.io/articles/tools-how-agents-actually-do-things/) |
 | `post-04` | [Context Is the Product](https://raskell.io/articles/context-is-the-product/)                    |
 | `post-05` | [Retrieval Is a Tool, Not a Layer](https://raskell.io/articles/retrieval-is-a-tool-not-a-layer/) |
+| `post-06` | [Memory Is a Write Path](https://raskell.io/articles/memory-is-a-write-path/)                    |
 
 ```
 git checkout post-01   # the ~150-line single-tool agent
@@ -23,6 +24,7 @@ git checkout post-02   # adds a hardened, sandboxed shell tool
 git checkout post-03   # adds a real registry, three more tools, parallel dispatch
 git checkout post-04   # adds a .AGENTS/ context loader
 git checkout post-05   # turns the loader into a lexical retriever behind a tool
+git checkout post-06   # adds a durable, agent-owned memory write path
 ```
 
 `main` always tracks the latest post.
@@ -112,4 +114,34 @@ The diff against `post-04`:
 
 ```
 git diff post-04 post-05
+```
+
+## Post-06 notes
+
+`post-06` gives the agent a write path. Retrieval (post-05) reads context
+the project authored; memory is the agent writing context for its own
+future sessions. A new `memory.ts` owns a `memory/` directory, one file
+per fact, each with `name`, `description`, and `type` frontmatter. The
+`name` is a slug and the filename stem, so writing the same name twice
+corrects a memory in place instead of forking it. `MEMORY.md` is an index
+derived from the files and regenerated on every write, so it cannot drift
+out of sync with the facts it points at.
+
+Two new tools land. `memory_write` is the write path: it validates the
+shape, clamps the body size, slugs the name, and writes only inside
+`memory/`, never `.AGENTS/`. `memory_search` reuses the post-05 BM25
+retriever over the memory bodies, so recall is the same ranker pointed at
+a second corpus. The one-line summaries are pinned into the system prompt
+every turn; the full bodies are pulled on demand.
+
+The split that keeps the agent from corrupting its own ground truth is a
+directory boundary and an authority boundary. `.AGENTS/` is project truth
+and read-only to the agent. `memory/` is the agent's own notes, framed in
+the prompt as fallible and lower-authority than the pinned context. The
+repo ships two seed memories so a fresh clone has a populated index.
+
+The diff against `post-05`:
+
+```
+git diff post-05 post-06
 ```
