@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Message, MessageParam } from "@anthropic-ai/sdk/resources/messages";
 import type { Tool } from "./types";
+import { metered, withBudget, type Ledger } from "./meter";
 
 // A turn the loop hands to a model: the four things every provider needs, plus
 // one routing signal the loop fills in. Note what is absent — no model string,
@@ -33,7 +34,10 @@ export function anthropicModel(id: string): Model {
       client.messages.create({
         model: id,
         max_tokens: req.maxTokens,
-        system: req.system,
+        // The system prompt is the same on every turn: pinned context, tool
+        // guidance, memory index. Marking it cached means turn two onward reads
+        // it back at a tenth of the input price instead of sending it again.
+        system: [{ type: "text", text: req.system, cache_control: { type: "ephemeral" } }],
         tools: req.tools,
         messages: req.messages,
       }),
@@ -86,8 +90,11 @@ export function router(cheap: Model, strong: Model): Model {
 // or point a tier at a second provider, without touching the loop. Failing the
 // strong tier down to the cheap one trades quality for availability on purpose;
 // in production the backup is the same tier on a second provider, same interface.
-export function defaultModel(): Model {
+// The budget wraps the meter, which wraps the router: the budget reads the total
+// the meter has been filling and adjusts the request before the router sees it.
+export function defaultModel(ledger: Ledger, capUSD: number): Model {
   const haiku = anthropicModel("claude-haiku-4-5");
   const sonnet = anthropicModel("claude-sonnet-4-6");
-  return router(withFallback(haiku, sonnet), withFallback(sonnet, haiku));
+  const routed = router(withFallback(haiku, sonnet), withFallback(sonnet, haiku));
+  return withBudget(metered(routed, ledger), ledger, capUSD);
 }

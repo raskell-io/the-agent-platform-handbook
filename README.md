@@ -18,6 +18,7 @@ post discusses.
 | `post-05` | [Retrieval Is a Tool, Not a Layer](https://raskell.io/articles/retrieval-is-a-tool-not-a-layer/) |
 | `post-06` | [Memory Is a Write Path](https://raskell.io/articles/memory-is-a-write-path/)                    |
 | `post-07` | [The Model Is a Dependency](https://raskell.io/articles/the-model-is-a-dependency/)              |
+| `post-08` | [The Bill Is Part of the Loop](https://raskell.io/articles/the-bill-is-part-of-the-loop/)        |
 
 ```
 git checkout post-01   # the ~150-line single-tool agent
@@ -27,6 +28,7 @@ git checkout post-04   # adds a .AGENTS/ context loader
 git checkout post-05   # turns the loader into a lexical retriever behind a tool
 git checkout post-06   # adds a durable, agent-owned memory write path
 git checkout post-07   # makes the model a dependency: router and fallback
+git checkout post-08   # prices every turn, caches the prompt, enforces a budget
 ```
 
 `main` always tracks the latest post.
@@ -169,4 +171,33 @@ The diff against `post-06`:
 
 ```
 git diff post-06 post-07
+```
+
+## Post-08 notes
+
+`post-08` makes the agent aware of what it costs. Every response already
+carries a `usage` object with four token counts (input, output, cache write,
+cache read). A new `price.ts` holds a per-model price table and turns a
+`usage` record into dollars.
+
+A new `meter.ts` adds two wrappers around the `Model` interface from
+`post-07`, so the loop does not change shape. `metered` adds the cost of
+every response to a `Ledger`, broken down by the model that actually
+answered. `withBudget` reads that ledger: past 80% of the cap it stops
+sending turns to the strong model, and at the cap it throws
+`BudgetExceeded`, which the loop catches to stop cleanly. The default cap
+is fifty cents per run.
+
+`model.ts` marks the system prompt for prompt caching, so the large, stable
+prefix (pinned context, memory index) is read back at a tenth of the input
+price from the second turn on. Every turn now logs its cost and the running
+total.
+
+The Anthropic SDK is bumped to `0.131.0`, because the cache fields on
+`usage` and `cache_control` on the system prompt are not in `0.32`.
+
+The diff against `post-07`:
+
+```
+git diff post-07 post-08
 ```
