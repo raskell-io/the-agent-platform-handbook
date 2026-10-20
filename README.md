@@ -17,6 +17,7 @@ post discusses.
 | `post-04` | [Context Is the Product](https://raskell.io/articles/context-is-the-product/)                    |
 | `post-05` | [Retrieval Is a Tool, Not a Layer](https://raskell.io/articles/retrieval-is-a-tool-not-a-layer/) |
 | `post-06` | [Memory Is a Write Path](https://raskell.io/articles/memory-is-a-write-path/)                    |
+| `post-07` | [The Model Is a Dependency](https://raskell.io/articles/the-model-is-a-dependency/)              |
 
 ```
 git checkout post-01   # the ~150-line single-tool agent
@@ -25,6 +26,7 @@ git checkout post-03   # adds a real registry, three more tools, parallel dispat
 git checkout post-04   # adds a .AGENTS/ context loader
 git checkout post-05   # turns the loader into a lexical retriever behind a tool
 git checkout post-06   # adds a durable, agent-owned memory write path
+git checkout post-07   # makes the model a dependency: router and fallback
 ```
 
 `main` always tracks the latest post.
@@ -144,4 +146,27 @@ The diff against `post-05`:
 
 ```
 git diff post-05 post-06
+```
+
+## Post-07 notes
+
+`post-07` pulls the model out of `agent.ts`. Until now the loop called the
+Anthropic SDK directly with a hardcoded model id. A new `model.ts` defines a
+`Model` interface (`complete(request)` returns a message), and the loop only
+ever talks to that interface.
+
+Behind it sit three small pieces. `anthropicModel(id)` is one concrete model.
+`router(cheap, strong)` sends each turn to Haiku or Sonnet depending on a
+`hard` flag the loop sets: the first turn is optimistic, and a turn that
+follows a tool error goes to the strong model. `withFallback(primary, backup)`
+fails over to the backup only when the primary is down (5xx or a connection
+error), never on a 400. `defaultModel()` wires them together.
+
+The loop, the registry, the tools, the context layer, the retriever, and the
+memory are untouched.
+
+The diff against `post-06`:
+
+```
+git diff post-06 post-07
 ```

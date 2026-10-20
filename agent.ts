@@ -1,6 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
 import type { MessageParam, ToolUseBlock } from "@anthropic-ai/sdk/resources/messages";
 import { Registry } from "./registry";
+import { defaultModel, type Model } from "./model";
 import { shell } from "./tools/shell";
 import { fs_read } from "./tools/fs";
 import { http_get } from "./tools/http";
@@ -11,8 +11,6 @@ import { memory_write } from "./tools/memory_write";
 import { loadContext, type LoadedContext } from "./context";
 import { buildIndex, manifest, type Index } from "./retriever";
 import { loadMemory, buildMemoryIndex, type LoadedMemory } from "./memory";
-
-const client = new Anthropic();
 
 function buildRegistry(contextIndex: Index, memoryIndex: Index): Registry {
   return new Registry()
@@ -77,13 +75,19 @@ function systemPrompt(ctx: LoadedContext, contextIndex: Index, mem: LoadedMemory
   return parts.join("\n\n");
 }
 
-async function step(registry: Registry, messages: MessageParam[], system: string) {
-  return client.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 4096,
+async function step(
+  model: Model,
+  registry: Registry,
+  messages: MessageParam[],
+  system: string,
+  hard: boolean,
+) {
+  return model.complete({
     system,
-    tools: registry.schemas(),
     messages,
+    tools: registry.schemas(),
+    maxTokens: 4096,
+    hard,
   });
 }
 
@@ -93,6 +97,7 @@ export async function run(goal: string, maxIterations = 10) {
   const mem = await loadMemory();
   const memoryIndex = await buildMemoryIndex();
   const registry = buildRegistry(contextIndex, memoryIndex);
+  const model = defaultModel();
   const system = systemPrompt(ctx, contextIndex, mem);
   for (const s of ctx.sources) {
     console.error(`# pinned ${s.path} (${s.bytes}B${s.truncated ? ", truncated" : ""})`);
@@ -105,9 +110,11 @@ export async function run(goal: string, maxIterations = 10) {
     console.error(`# memory ${mem.memories.length} entries`);
   }
   const messages: MessageParam[] = [{ role: "user", content: goal }];
+  let hard = false; // first turn is optimistic: take the cheap model, escalate on trouble
 
   for (let i = 0; i < maxIterations; i++) {
-    const response = await step(registry, messages, system);
+    const response = await step(model, registry, messages, system, hard);
+    console.error(`# turn ${i + 1} ${hard ? "hard" : "easy"} -> ${response.model}`);
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason === "end_turn") {
@@ -139,6 +146,7 @@ export async function run(goal: string, maxIterations = 10) {
       }),
     );
 
+    hard = results.some((r) => r.is_error); // a tool error means the next turn is recovery: send in the strong model
     messages.push({ role: "user", content: results });
   }
 
