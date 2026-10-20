@@ -2,6 +2,7 @@ import type { MessageParam, ToolUseBlock } from "@anthropic-ai/sdk/resources/mes
 import { Registry } from "./registry";
 import { defaultModel, type Model } from "./model";
 import { newLedger, BudgetExceeded } from "./meter";
+import { Tracer, traced, tracedDispatch, render } from "./span";
 import { shell } from "./tools/shell";
 import { fs_read } from "./tools/fs";
 import { http_get } from "./tools/http";
@@ -92,14 +93,28 @@ async function step(
   });
 }
 
+// One span for the whole run, closed however the run ends, then printed as a
+// tree: which turn escalated, which tool failed, where the time and money went.
 export async function run(goal: string, maxIterations = 10) {
+  const tracer = new Tracer();
+  const session = tracer.enter("agent.session", "run");
+  try {
+    await loop(goal, maxIterations, tracer);
+  } finally {
+    tracer.exit(session);
+    console.error(render(session));
+  }
+}
+
+async function loop(goal: string, maxIterations: number, tracer: Tracer) {
   const ctx = await loadContext();
   const contextIndex = await buildIndex();
   const mem = await loadMemory();
   const memoryIndex = await buildMemoryIndex();
   const registry = buildRegistry(contextIndex, memoryIndex);
   const ledger = newLedger();
-  const model = defaultModel(ledger, 0.5); // fifty-cent ceiling for the run
+  // traced sits outermost so its spans see the turn after budget and fallback
+  const model = traced(defaultModel(ledger, 0.5), tracer); // fifty-cent ceiling for the run
   const system = systemPrompt(ctx, contextIndex, mem);
   for (const s of ctx.sources) {
     console.error(`# pinned ${s.path} (${s.bytes}B${s.truncated ? ", truncated" : ""})`);
@@ -115,55 +130,60 @@ export async function run(goal: string, maxIterations = 10) {
   let hard = false; // first turn is optimistic: take the cheap model, escalate on trouble
 
   for (let i = 0; i < maxIterations; i++) {
-    const before = ledger.cost;
-    let response;
+    const turn = tracer.enter(`turn ${i + 1}`, "turn", { hard });
     try {
-      response = await step(model, registry, messages, system, hard);
-    } catch (err) {
-      if (err instanceof BudgetExceeded) {
-        console.error(`# ${err.message} -- stopping with a partial answer`);
+      const before = ledger.cost;
+      let response;
+      try {
+        response = await step(model, registry, messages, system, hard);
+      } catch (err) {
+        if (err instanceof BudgetExceeded) {
+          console.error(`# ${err.message} -- stopping with a partial answer`);
+          return;
+        }
+        throw err;
+      }
+      const turnCost = ledger.cost - before;
+      console.error(
+        `# turn ${i + 1} ${hard ? "hard" : "easy"} -> ${response.model} ` +
+          `$${turnCost.toFixed(4)} (run $${ledger.cost.toFixed(4)})`,
+      );
+      messages.push({ role: "assistant", content: response.content });
+
+      if (response.stop_reason === "end_turn") {
+        const text = response.content
+          .filter((b) => b.type === "text")
+          .map((b) => (b as { text: string }).text)
+          .join("\n");
+        console.log(text);
         return;
       }
-      throw err;
+
+      if (response.stop_reason !== "tool_use") {
+        throw new Error(`unexpected stop reason: ${response.stop_reason}`);
+      }
+
+      const calls = response.content.filter(
+        (b): b is ToolUseBlock => b.type === "tool_use",
+      );
+      const results = await Promise.all(
+        calls.map(async (block) => {
+          const result = await tracedDispatch(registry, tracer, block.name, block.input as Record<string, unknown>);
+          console.error(`> ${block.name} ${JSON.stringify(block.input)} -> ${result.ok ? "ok" : "err"}`);
+          return {
+            type: "tool_result" as const,
+            tool_use_id: block.id,
+            content: result.ok ? result.value : result.error,
+            is_error: !result.ok,
+          };
+        }),
+      );
+
+      hard = results.some((r) => r.is_error); // a tool error means the next turn is recovery: send in the strong model
+      messages.push({ role: "user", content: results });
+    } finally {
+      tracer.exit(turn);
     }
-    const turnCost = ledger.cost - before;
-    console.error(
-      `# turn ${i + 1} ${hard ? "hard" : "easy"} -> ${response.model} ` +
-        `$${turnCost.toFixed(4)} (run $${ledger.cost.toFixed(4)})`,
-    );
-    messages.push({ role: "assistant", content: response.content });
-
-    if (response.stop_reason === "end_turn") {
-      const text = response.content
-        .filter((b) => b.type === "text")
-        .map((b) => (b as { text: string }).text)
-        .join("\n");
-      console.log(text);
-      return;
-    }
-
-    if (response.stop_reason !== "tool_use") {
-      throw new Error(`unexpected stop reason: ${response.stop_reason}`);
-    }
-
-    const calls = response.content.filter(
-      (b): b is ToolUseBlock => b.type === "tool_use",
-    );
-    const results = await Promise.all(
-      calls.map(async (block) => {
-        const result = await registry.dispatch(block.name, block.input as Record<string, unknown>);
-        console.error(`> ${block.name} ${JSON.stringify(block.input)} -> ${result.ok ? "ok" : "err"}`);
-        return {
-          type: "tool_result" as const,
-          tool_use_id: block.id,
-          content: result.ok ? result.value : result.error,
-          is_error: !result.ok,
-        };
-      }),
-    );
-
-    hard = results.some((r) => r.is_error); // a tool error means the next turn is recovery: send in the strong model
-    messages.push({ role: "user", content: results });
   }
 
   console.error(`iteration limit (${maxIterations}) reached`);

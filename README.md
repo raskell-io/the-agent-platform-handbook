@@ -19,6 +19,7 @@ post discusses.
 | `post-06` | [Memory Is a Write Path](https://raskell.io/articles/memory-is-a-write-path/)                    |
 | `post-07` | [The Model Is a Dependency](https://raskell.io/articles/the-model-is-a-dependency/)              |
 | `post-08` | [The Bill Is Part of the Loop](https://raskell.io/articles/the-bill-is-part-of-the-loop/)        |
+| `post-09` | [Observability Is Not Logging](https://raskell.io/articles/observability-is-not-logging/)        |
 
 ```
 git checkout post-01   # the ~150-line single-tool agent
@@ -29,6 +30,7 @@ git checkout post-05   # turns the loader into a lexical retriever behind a tool
 git checkout post-06   # adds a durable, agent-owned memory write path
 git checkout post-07   # makes the model a dependency: router and fallback
 git checkout post-08   # prices every turn, caches the prompt, enforces a budget
+git checkout post-09   # records every run as a trace: a tree of spans
 ```
 
 `main` always tracks the latest post.
@@ -200,4 +202,26 @@ The diff against `post-07`:
 
 ```
 git diff post-07 post-08
+```
+
+## Post-09 notes
+
+`post-09` records what a run actually did. The ledger from `post-08` knows
+the total cost; it does not know which turn spent it, which tool failed, or
+where the time went. A new `span.ts` turns each run into a trace: a tree of
+spans, one for the run, one per turn, and one per model call and tool call
+inside each turn. Each span has a duration and attributes (the model that
+answered, token counts, cost, whether a tool failed).
+
+`traced` is one more wrapper around the `Model` interface, placed outside
+the budget and the meter so it records the turn as it actually ran.
+`tracedDispatch` does the same for tool calls. Tool calls in one turn run in
+parallel, so model and tool spans are attached as leaves under the current
+turn rather than pushed on a stack. When the run ends, the tree is printed to
+stderr.
+
+The diff against `post-08`:
+
+```
+git diff post-08 post-09
 ```
