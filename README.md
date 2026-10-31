@@ -20,6 +20,7 @@ post discusses.
 | `post-07` | [The Model Is a Dependency](https://raskell.io/articles/the-model-is-a-dependency/)              |
 | `post-08` | [The Bill Is Part of the Loop](https://raskell.io/articles/the-bill-is-part-of-the-loop/)        |
 | `post-09` | [Observability Is Not Logging](https://raskell.io/articles/observability-is-not-logging/)        |
+| `post-10` | [Evaluation Closes the Loop](https://raskell.io/articles/evaluation-closes-the-loop/)            |
 
 ```
 git checkout post-01   # the ~150-line single-tool agent
@@ -31,6 +32,7 @@ git checkout post-06   # adds a durable, agent-owned memory write path
 git checkout post-07   # makes the model a dependency: router and fallback
 git checkout post-08   # prices every turn, caches the prompt, enforces a budget
 git checkout post-09   # records every run as a trace: a tree of spans
+git checkout post-10   # scores the agent against a golden set, catches regressions
 ```
 
 `main` always tracks the latest post.
@@ -224,4 +226,39 @@ The diff against `post-08`:
 
 ```
 git diff post-08 post-09
+```
+
+## Post-10 notes
+
+`post-10` gives the harness a way to tell a good run from a bad one. The
+trace from `post-09` shows what a run did; it looks the same whether the
+answer was right or wrong.
+
+`evals/golden.json` is a small set of cases about this repository: an input,
+and what a good run looks like. `score.ts` checks each run four ways, from
+strict to loose: which tools it used (read from the trace), tool calls that
+must never happen (matched on their arguments), strings the answer must
+contain, and a rubric graded by a second model. `eval.ts` runs every case
+three times, passes it on a majority, and prints a pass rate.
+
+```
+bun eval.ts                                  # run the suite
+bun eval.ts --only refuse-to-print-env       # one case
+bun eval.ts --save evals/baseline.json       # record a baseline
+bun eval.ts --baseline evals/baseline.json   # exit 1 if a passing case now fails
+bun eval.ts add "<input that went wrong>" --rubric "<what a right answer does>"
+```
+
+`agent.ts` now returns its result (answer, why it stopped, cost, tool calls,
+trace) instead of only printing it, and only starts the CLI when run
+directly, so `eval.ts` can import it. Each eval run gets a fresh copy of
+`memory/`, so one case cannot change the next.
+
+`price.ts` also accepts a dated model id (`claude-haiku-4-5-20251001`) for an
+alias, since the API may report the snapshot it resolved the alias to.
+
+The diff against `post-09`:
+
+```
+git diff post-09 post-10
 ```

@@ -17,7 +17,9 @@ const PRICES: Record<string, Price> = {
 // Price one response. The buckets are summed separately because a cache read
 // costs a tenth of fresh input, and that gap is the whole point of caching.
 export function costOf(model: string, usage: Usage): number {
-  const p = PRICES[model];
+  // The API may answer an alias with its dated snapshot (claude-haiku-4-5 ->
+  // claude-haiku-4-5-20251001); both share a price, so drop the date to look it up.
+  const p = PRICES[model] ?? PRICES[model.replace(/-\d{8}$/, "")];
   if (!p) throw new Error(`no price for model ${model}`);
   return (
     (usage.input_tokens * p.input +

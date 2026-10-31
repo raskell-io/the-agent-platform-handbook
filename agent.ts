@@ -2,7 +2,7 @@ import type { MessageParam, ToolUseBlock } from "@anthropic-ai/sdk/resources/mes
 import { Registry } from "./registry";
 import { defaultModel, type Model } from "./model";
 import { newLedger, BudgetExceeded } from "./meter";
-import { Tracer, traced, tracedDispatch, render } from "./span";
+import { Tracer, traced, tracedDispatch, render, type Span } from "./span";
 import { shell } from "./tools/shell";
 import { fs_read } from "./tools/fs";
 import { http_get } from "./tools/http";
@@ -93,20 +93,32 @@ async function step(
   });
 }
 
-// One span for the whole run, closed however the run ends, then printed as a
-// tree: which turn escalated, which tool failed, where the time and money went.
-export async function run(goal: string, maxIterations = 10) {
+// What a run hands back instead of printing: the answer, why it stopped, what
+// it cost, and the trace. The CLI prints it; the evaluator in eval.ts grades it.
+export type RunResult = {
+  answer: string | null;
+  stopped: "answer" | "budget" | "limit";
+  cost: number;
+  // Every tool call with its arguments. The trace deliberately leaves
+  // arguments out (post-09); an evaluator checking *how* the agent worked
+  // needs them, so they come from the transcript instead.
+  calls: { name: string; input: Record<string, unknown> }[];
+  trace: Span;
+};
+
+// One span for the whole run, closed however the run ends: which turn
+// escalated, which tool failed, where the time and money went.
+export async function run(goal: string, maxIterations = 10): Promise<RunResult> {
   const tracer = new Tracer();
   const session = tracer.enter("agent.session", "run");
   try {
-    await loop(goal, maxIterations, tracer);
+    return { ...(await loop(goal, maxIterations, tracer)), trace: session };
   } finally {
     tracer.exit(session);
-    console.error(render(session));
   }
 }
 
-async function loop(goal: string, maxIterations: number, tracer: Tracer) {
+async function loop(goal: string, maxIterations: number, tracer: Tracer): Promise<Omit<RunResult, "trace">> {
   const ctx = await loadContext();
   const contextIndex = await buildIndex();
   const mem = await loadMemory();
@@ -127,6 +139,7 @@ async function loop(goal: string, maxIterations: number, tracer: Tracer) {
     console.error(`# memory ${mem.memories.length} entries`);
   }
   const messages: MessageParam[] = [{ role: "user", content: goal }];
+  const calls: RunResult["calls"] = [];
   let hard = false; // first turn is optimistic: take the cheap model, escalate on trouble
 
   for (let i = 0; i < maxIterations; i++) {
@@ -139,7 +152,7 @@ async function loop(goal: string, maxIterations: number, tracer: Tracer) {
       } catch (err) {
         if (err instanceof BudgetExceeded) {
           console.error(`# ${err.message} -- stopping with a partial answer`);
-          return;
+          return { answer: null, stopped: "budget", cost: ledger.cost, calls };
         }
         throw err;
       }
@@ -155,19 +168,19 @@ async function loop(goal: string, maxIterations: number, tracer: Tracer) {
           .filter((b) => b.type === "text")
           .map((b) => (b as { text: string }).text)
           .join("\n");
-        console.log(text);
-        return;
+        return { answer: text, stopped: "answer", cost: ledger.cost, calls };
       }
 
       if (response.stop_reason !== "tool_use") {
         throw new Error(`unexpected stop reason: ${response.stop_reason}`);
       }
 
-      const calls = response.content.filter(
+      const toolUses = response.content.filter(
         (b): b is ToolUseBlock => b.type === "tool_use",
       );
       const results = await Promise.all(
-        calls.map(async (block) => {
+        toolUses.map(async (block) => {
+          calls.push({ name: block.name, input: block.input as Record<string, unknown> });
           const result = await tracedDispatch(registry, tracer, block.name, block.input as Record<string, unknown>);
           console.error(`> ${block.name} ${JSON.stringify(block.input)} -> ${result.ok ? "ok" : "err"}`);
           return {
@@ -187,11 +200,18 @@ async function loop(goal: string, maxIterations: number, tracer: Tracer) {
   }
 
   console.error(`iteration limit (${maxIterations}) reached`);
+  return { answer: null, stopped: "limit", cost: ledger.cost, calls };
 }
 
-const goal = process.argv.slice(2).join(" ");
-if (!goal) {
-  console.error("usage: bun agent.ts '<goal>'");
-  process.exit(1);
+// Only when run as `bun agent.ts`, so that eval.ts can import run() without
+// starting an agent.
+if (import.meta.main) {
+  const goal = process.argv.slice(2).join(" ");
+  if (!goal) {
+    console.error("usage: bun agent.ts '<goal>'");
+    process.exit(1);
+  }
+  const result = await run(goal);
+  if (result.answer) console.log(result.answer);
+  console.error(render(result.trace));
 }
-await run(goal);
