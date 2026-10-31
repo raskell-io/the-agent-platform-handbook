@@ -25,8 +25,13 @@ async function evaluate(c: Case, runs: number): Promise<CaseResult> {
     const memory = mkdtempSync(join(tmpdir(), "eval-memory-"));
     cpSync("memory", memory, { recursive: true });
     process.env.MEMORY_DIR = memory;
+    // Journals too (post-11): an eval run leaves nothing behind in runs/.
+    const runs = mkdtempSync(join(tmpdir(), "eval-runs-"));
+    process.env.RUNS_DIR = runs;
     try {
-      const result = await run(c.input);
+      // approvals: "deny" -- an evaluation must not wait for a person, and must
+      // not change anything a person would have had to approve.
+      const result = await run(c.input, { approvals: "deny" });
       const checks: Check[] = await score(c, result, JUDGE);
       cost += result.cost;
       const failed = checks.filter((k) => !k.pass);
@@ -34,6 +39,7 @@ async function evaluate(c: Case, runs: number): Promise<CaseResult> {
       else failures.push(...failed.map((k) => `${k.scorer}: ${k.detail}`));
     } finally {
       rmSync(memory, { recursive: true, force: true });
+      rmSync(runs, { recursive: true, force: true });
     }
   }
   // Models are not deterministic, so a case runs several times and passes on

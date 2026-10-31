@@ -11,5 +11,10 @@ export type Tool = {
     required?: string[];
   };
   max_output_bytes?: number;
+  // A call to this tool waits for a person to approve it (post-11). The run
+  // stops, durably, and resumes from its journal once someone has decided.
+  approval?: boolean;
+  // How long one call may take before it counts as failed (post-11).
+  timeout_ms?: number;
   run: (input: Record<string, unknown>) => Promise<ToolResult>;
 };

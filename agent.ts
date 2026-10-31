@@ -1,4 +1,4 @@
-import type { MessageParam, ToolUseBlock } from "@anthropic-ai/sdk/resources/messages";
+import type { Message, MessageParam, ToolUseBlock } from "@anthropic-ai/sdk/resources/messages";
 import { Registry } from "./registry";
 import { defaultModel, type Model } from "./model";
 import { newLedger, BudgetExceeded } from "./meter";
@@ -13,6 +13,8 @@ import { memory_write } from "./tools/memory_write";
 import { loadContext, type LoadedContext } from "./context";
 import { buildIndex, manifest, type Index } from "./retriever";
 import { loadMemory, buildMemoryIndex, type LoadedMemory } from "./memory";
+import { Journal, once, listRuns } from "./journal";
+import type { ToolResult } from "./types";
 
 function buildRegistry(contextIndex: Index, memoryIndex: Index): Registry {
   return new Registry()
@@ -96,8 +98,11 @@ async function step(
 // What a run hands back instead of printing: the answer, why it stopped, what
 // it cost, and the trace. The CLI prints it; the evaluator in eval.ts grades it.
 export type RunResult = {
+  runId: string;
   answer: string | null;
-  stopped: "answer" | "budget" | "limit";
+  // "waiting": a tool call needs a person's approval; the run stopped and
+  // resumes from its journal once someone has decided (post-11).
+  stopped: "answer" | "budget" | "limit" | "waiting";
   cost: number;
   // Every tool call with its arguments. The trace deliberately leaves
   // arguments out (post-09); an evaluator checking *how* the agent worked
@@ -106,19 +111,45 @@ export type RunResult = {
   trace: Span;
 };
 
+export type RunOptions = {
+  maxIterations?: number;
+  // What a tool call that needs approval does: stop and wait for a person (the
+  // CLI), or be refused (the evaluator, which must not change what it measures).
+  approvals?: "wait" | "deny";
+};
+
+// A run is a journal plus the loop that fills it. run() starts a new one;
+// resume() replays an existing one up to where it stopped and carries on.
+export async function run(goal: string, opts: RunOptions = {}): Promise<RunResult> {
+  return execute(Journal.create(goal), opts);
+}
+
+export async function resume(id: string, opts: RunOptions = {}): Promise<RunResult> {
+  return execute(Journal.open(id), opts);
+}
+
 // One span for the whole run, closed however the run ends: which turn
 // escalated, which tool failed, where the time and money went.
-export async function run(goal: string, maxIterations = 10): Promise<RunResult> {
+async function execute(journal: Journal, opts: RunOptions): Promise<RunResult> {
   const tracer = new Tracer();
-  const session = tracer.enter("agent.session", "run");
+  const session = tracer.enter("agent.session", "run", { "run.id": journal.id });
   try {
-    return { ...(await loop(goal, maxIterations, tracer)), trace: session };
+    const result = await loop(journal, opts.maxIterations ?? 10, opts.approvals ?? "wait", tracer);
+    return { ...result, runId: journal.id, trace: session };
   } finally {
     tracer.exit(session);
   }
 }
 
-async function loop(goal: string, maxIterations: number, tracer: Tracer): Promise<Omit<RunResult, "trace">> {
+type LoopResult = Omit<RunResult, "trace" | "runId">;
+
+async function loop(
+  journal: Journal,
+  maxIterations: number,
+  approvals: "wait" | "deny",
+  tracer: Tracer,
+): Promise<LoopResult> {
+  const goal = journal.goal;
   const ctx = await loadContext();
   const contextIndex = await buildIndex();
   const mem = await loadMemory();
@@ -138,6 +169,15 @@ async function loop(goal: string, maxIterations: number, tracer: Tracer): Promis
   if (mem.memories.length > 0) {
     console.error(`# memory ${mem.memories.length} entries`);
   }
+  console.error(
+    `# run ${journal.id}` +
+      (journal.entries.length > 1 ? `, resuming from ${journal.entries.length} journal entries` : ""),
+  );
+  // The end is recorded once: replaying a finished run reads it, not rewrites it.
+  const finish = (r: LoopResult): LoopResult => {
+    if (journal.status() !== "done") journal.append({ kind: "end", stopped: r.stopped, at: new Date().toISOString() });
+    return r;
+  };
   const messages: MessageParam[] = [{ role: "user", content: goal }];
   const calls: RunResult["calls"] = [];
   let hard = false; // first turn is optimistic: take the cheap model, escalate on trouble
@@ -145,21 +185,34 @@ async function loop(goal: string, maxIterations: number, tracer: Tracer): Promis
   for (let i = 0; i < maxIterations; i++) {
     const turn = tracer.enter(`turn ${i + 1}`, "turn", { hard });
     try {
-      const before = ledger.cost;
-      let response;
+      let response: Message;
+      let turnCost: number;
+      let replayed: boolean;
       try {
-        response = await step(model, registry, messages, system, hard);
+        // A model call happens at most once per turn of a run. On a resume the
+        // response comes back from the journal: no tokens, no cost, and the
+        // same answer the run acted on the first time.
+        const r = await once(journal, "model", `turn ${i + 1}`, async () => {
+          const before = ledger.cost;
+          const value = await step(model, registry, messages, system, hard);
+          return { value, cost: ledger.cost - before };
+        });
+        response = r.value as Message;
+        turnCost = r.cost;
+        replayed = r.replayed;
+        // The budget counts what the run spent before it was interrupted.
+        if (replayed) ledger.cost += r.cost;
       } catch (err) {
         if (err instanceof BudgetExceeded) {
           console.error(`# ${err.message} -- stopping with a partial answer`);
-          return { answer: null, stopped: "budget", cost: ledger.cost, calls };
+          return finish({ answer: null, stopped: "budget", cost: ledger.cost, calls });
         }
         throw err;
       }
-      const turnCost = ledger.cost - before;
+      turn.attributes.replayed = replayed;
       console.error(
         `# turn ${i + 1} ${hard ? "hard" : "easy"} -> ${response.model} ` +
-          `$${turnCost.toFixed(4)} (run $${ledger.cost.toFixed(4)})`,
+          `$${turnCost.toFixed(4)} (run $${ledger.cost.toFixed(4)})${replayed ? " replayed" : ""}`,
       );
       messages.push({ role: "assistant", content: response.content });
 
@@ -168,7 +221,7 @@ async function loop(goal: string, maxIterations: number, tracer: Tracer): Promis
           .filter((b) => b.type === "text")
           .map((b) => (b as { text: string }).text)
           .join("\n");
-        return { answer: text, stopped: "answer", cost: ledger.cost, calls };
+        return finish({ answer: text, stopped: "answer", cost: ledger.cost, calls });
       }
 
       if (response.stop_reason !== "tool_use") {
@@ -178,11 +231,49 @@ async function loop(goal: string, maxIterations: number, tracer: Tracer): Promis
       const toolUses = response.content.filter(
         (b): b is ToolUseBlock => b.type === "tool_use",
       );
+      // Calls that need a person go through the journal too: the run records
+      // what it is waiting for and stops. Nothing of this turn runs until every
+      // one of them is decided, so a resume picks the turn up whole.
+      const pending = toolUses.filter(
+        (b) => registry.needsApproval(b.name) && !journal.find("tool", b.id) && !journal.find("decision", b.id),
+      );
+      if (pending.length > 0 && approvals === "wait") {
+        for (const b of pending) {
+          if (!journal.find("wait", b.id)) {
+            journal.append({
+              kind: "wait", key: b.id, name: b.name,
+              input: b.input as Record<string, unknown>, at: new Date().toISOString(),
+            });
+          }
+          console.error(`# approval needed: ${b.name} ${JSON.stringify(b.input)}`);
+        }
+        return { answer: null, stopped: "waiting", cost: ledger.cost, calls };
+      }
+
       const results = await Promise.all(
         toolUses.map(async (block) => {
-          calls.push({ name: block.name, input: block.input as Record<string, unknown> });
-          const result = await tracedDispatch(registry, tracer, block.name, block.input as Record<string, unknown>);
-          console.error(`> ${block.name} ${JSON.stringify(block.input)} -> ${result.ok ? "ok" : "err"}`);
+          const input = block.input as Record<string, unknown>;
+          calls.push({ name: block.name, input });
+          // A tool call happens at most once per run too, keyed by its
+          // tool_use id. A crash between the call and the journal write is the
+          // one gap: that call runs again on resume, so tools with side effects
+          // have to be safe to repeat (memory_write overwrites by name).
+          const r = await once(journal, "tool", block.id, async () => {
+            let value: ToolResult;
+            if (registry.needsApproval(block.name)) {
+              const d = journal.find("decision", block.id);
+              value = d?.approved
+                ? await tracedDispatch(registry, tracer, block.name, input)
+                : { ok: false, error: d ? "the operator declined this call" : "this run does not allow calls that need approval" };
+            } else {
+              value = await tracedDispatch(registry, tracer, block.name, input);
+            }
+            return { value, name: block.name };
+          });
+          const result = r.value;
+          // Replayed calls still belong in the trace, marked as such.
+          if (r.replayed) tracer.end(tracer.start(`tool.${block.name}`, "tool", { "tool.name": block.name, replayed: true }));
+          console.error(`> ${block.name} ${JSON.stringify(block.input)} -> ${result.ok ? "ok" : "err"}${r.replayed ? " (replayed)" : ""}`);
           return {
             type: "tool_result" as const,
             tool_use_id: block.id,
@@ -194,24 +285,56 @@ async function loop(goal: string, maxIterations: number, tracer: Tracer): Promis
 
       hard = results.some((r) => r.is_error); // a tool error means the next turn is recovery: send in the strong model
       messages.push({ role: "user", content: results });
+
+      // For trying it out: kill the process the hard way after a given turn,
+      // the way an OOM kill or a lost node would, then `bun agent.ts resume`.
+      if (!replayed && process.env.CRASH_AFTER_TURN === String(i + 1)) {
+        console.error(`# simulated crash after turn ${i + 1}`);
+        process.kill(process.pid, "SIGKILL");
+      }
     } finally {
       tracer.exit(turn);
     }
   }
 
   console.error(`iteration limit (${maxIterations}) reached`);
-  return { answer: null, stopped: "limit", cost: ledger.cost, calls };
+  return finish({ answer: null, stopped: "limit", cost: ledger.cost, calls });
 }
 
 // Only when run as `bun agent.ts`, so that eval.ts can import run() without
 // starting an agent.
+//   bun agent.ts '<goal>'            start a run
+//   bun agent.ts resume <run-id>     replay a run's journal and carry on
+//   bun agent.ts approve <run-id>    approve what a waiting run asked for (or: deny)
+//   bun agent.ts runs                list runs and their status
 if (import.meta.main) {
+  const [cmd, id] = process.argv.slice(2);
+  if (cmd === "runs") {
+    for (const r of listRuns()) console.log(`${r.id}  ${r.status.padEnd(11)}  ${r.goal}`);
+    process.exit(0);
+  }
+  if ((cmd === "approve" || cmd === "deny") && id) {
+    const journal = Journal.open(id);
+    const open = journal.entries.filter(
+      (e): e is Extract<typeof e, { kind: "wait" }> => e.kind === "wait" && !journal.find("decision", e.key),
+    );
+    for (const w of open) {
+      journal.append({ kind: "decision", key: w.key, approved: cmd === "approve", at: new Date().toISOString() });
+      console.log(`${cmd === "approve" ? "approved" : "denied"}: ${w.name} ${JSON.stringify(w.input)}`);
+    }
+    if (open.length === 0) console.log(`run ${id} is not waiting for anything`);
+    else console.log(`now: bun agent.ts resume ${id}`);
+    process.exit(0);
+  }
   const goal = process.argv.slice(2).join(" ");
   if (!goal) {
-    console.error("usage: bun agent.ts '<goal>'");
+    console.error("usage: bun agent.ts '<goal>' | resume <run-id> | approve <run-id> | deny <run-id> | runs");
     process.exit(1);
   }
-  const result = await run(goal);
+  const result = cmd === "resume" && id ? await resume(id) : await run(goal);
   if (result.answer) console.log(result.answer);
   console.error(render(result.trace));
+  if (result.stopped === "waiting") {
+    console.error(`# run ${result.runId} is waiting: bun agent.ts approve ${result.runId} (or deny), then resume`);
+  }
 }

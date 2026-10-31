@@ -3,6 +3,9 @@ import { writeMemory } from "../memory";
 
 export const memory_write: Tool = {
   name: "memory_write",
+  // The one tool with a lasting side effect: what it writes, every later run
+  // reads. So a person approves each write (post-11).
+  approval: true,
   description:
     "Save a durable memory for your future self in a later session. Use it " +
     "for a stable, reusable fact the project context does not already record: " +

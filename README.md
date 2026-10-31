@@ -21,6 +21,7 @@ post discusses.
 | `post-08` | [The Bill Is Part of the Loop](https://raskell.io/articles/the-bill-is-part-of-the-loop/)        |
 | `post-09` | [Observability Is Not Logging](https://raskell.io/articles/observability-is-not-logging/)        |
 | `post-10` | [Evaluation Closes the Loop](https://raskell.io/articles/evaluation-closes-the-loop/)            |
+| `post-11` | [The Run Outlives the Process](https://raskell.io/articles/the-run-outlives-the-process/)        |
 
 ```
 git checkout post-01   # the ~150-line single-tool agent
@@ -33,6 +34,7 @@ git checkout post-07   # makes the model a dependency: router and fallback
 git checkout post-08   # prices every turn, caches the prompt, enforces a budget
 git checkout post-09   # records every run as a trace: a tree of spans
 git checkout post-10   # scores the agent against a golden set, catches regressions
+git checkout post-11   # journals every step: resume after a crash, wait for approval
 ```
 
 `main` always tracks the latest post.
@@ -262,3 +264,28 @@ The diff against `post-09`:
 ```
 git diff post-09 post-10
 ```
+
+## Post-11 notes
+
+`post-11` makes a run outlive the process running it. `journal.ts` appends
+every model response and tool result to `runs/<run-id>.jsonl`, flushed to disk
+before the run moves on. `bun agent.ts resume <run-id>` replays that journal:
+recorded steps come back from the file instead of being asked for again, so a
+restart costs nothing and repeats nothing, and the run carries on live from
+where it stopped.
+
+```
+bun agent.ts "<goal>"                        # prints the run id
+CRASH_AFTER_TURN=2 bun agent.ts "<goal>"     # kill -9 after turn 2, for trying it
+bun agent.ts runs                            # every run and its status
+bun agent.ts resume <run-id>                 # replay the journal and carry on
+bun agent.ts approve <run-id>                # or: deny
+```
+
+`memory_write` now needs approval: a run that wants to write a memory records
+what it is waiting for and stops. `approve` or `deny` records the decision in
+the journal, and `resume` picks the run up, a minute or a week later. Tools
+get a timeout (`timeout_ms`, 30 seconds by default), so a hung call becomes an
+error the model can work around. `eval.ts` runs with approvals denied and
+keeps its journals in a temporary directory.
+
